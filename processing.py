@@ -13,34 +13,45 @@ class PontoProcessor:
         else:
             self.file_paths = file_paths
 
-    @staticmethod
-    def _time_to_minutes(time_str: str) -> int:
-        if not time_str or time_str == "00:00": return 0
-        match = re.search(r"(\d{2,3}):(\d{2})", str(time_str))
-        if match:
-            return int(match.group(1)) * 60 + int(match.group(2))
-        return 0
+    def _get_x_cols(self, pdf) -> tuple:
+        for page in pdf:
+            words = page.get_text("words")
+            y_totais = None
+            for w in words:
+                if "TOTAIS" in w[4].upper():
+                    y_totais = (w[1] + w[3]) / 2
+                    break
+            
+            if y_totais is not None:
+                tempos = []
+                for w in words:
+                    txt = re.sub(r'[*^]', '', w[4].strip())
+                    if re.match(r"^\d{2,3}:\d{2}$", txt):
+                        y_word = (w[1] + w[3]) / 2
+                        if abs(y_word - y_totais) < 10:
+                            tempos.append(((w[0] + w[2]) / 2, txt))
+                
+                if tempos:
+                    tempos.sort(key=lambda x: x[0])
+                    x_normais = tempos[0][0] if len(tempos) > 0 else None
+                    x_faltas = tempos[1][0] if len(tempos) > 1 else None
+                    x_extras = tempos[2][0] if len(tempos) > 2 else None
+                    return x_normais, x_faltas, x_extras 
+        return None, None, None
 
-    @staticmethod
-    def _minutes_to_time(minutes: int) -> str:
-        h = int(minutes // 60)
-        m = int(minutes % 60)
-        return f"{h:02d}:{m:02d}"
-
-    def _extract_info(self, page) -> dict:
+    def _extract_page_info(self, page, x_normais, x_faltas, x_extras) -> dict:
         texto = page.get_text("text")
         if not texto: return None
 
         linhas = [l.strip() for l in texto.split('\n') if l.strip()]
         nome = None
         departamento = "Desconhecido"
-        faltas = None
-        extras = None
 
         for i, linha in enumerate(linhas):
             if "Departamento:" in linha and departamento == "Desconhecido":
                 match = re.search(r"Departamento:\s*([^.]+)", linha, re.IGNORECASE)
-                if match: departamento = match.group(1).strip()
+                if match:
+                    departamento = match.group(1).strip()
 
             if "NOME:" in linha and not nome:
                 cand_mesma_linha = linha.replace("NOME:", "").strip()
@@ -57,97 +68,104 @@ class PontoProcessor:
                         nome = re.sub(r'\s+\d+$', '', cand).strip()
                         break
 
-            if "TOTAIS" in linha and faltas is None:
-                tempos = []
-                for j in range(i, min(i + 15, len(linhas))):
-                    cand_tempo = linhas[j].strip()
-                    if re.match(r"^\d{2,3}:\d{2}$", cand_tempo): tempos.append(cand_tempo)
-                if len(tempos) >= 3:
-                    faltas, extras = tempos[1], tempos[2]
-                else:
-                    faltas, extras = "00:00", "00:00"
+            if nome and departamento != "Desconhecido":
+                break
 
-            if nome and departamento != "Desconhecido" and faltas is not None: break
-                
+        registros_diarios = {} 
+        words = page.get_text("words") 
+        dates_info = []
+
+        for w in words:
+            match = re.search(r"\b(\d{2}/\d{2}/\d{4})\b", w[4])
+            if match:
+                x_center = (w[0] + w[2]) / 2
+                y_center = (w[1] + w[3]) / 2
+                dates_info.append((x_center, y_center, match.group(1)))
+
+        if dates_info:
+            grupos_x = []
+            for x, y, dt in dates_info:
+                alocado = False
+                for g in grupos_x:
+                    if abs(g['x_ref'] - x) < 30:
+                        g['elementos'].append((y, dt))
+                        alocado = True
+                        break
+                if not alocado:
+                    grupos_x.append({'x_ref': x, 'elementos': [(y, dt)]})
+
+            maior_grupo = max(grupos_x, key=lambda g: len(g['elementos']))
+            elementos_datas = maior_grupo['elementos'] 
+
+            if x_normais is not None or x_faltas is not None or x_extras is not None:
+                for y_data, dt in elementos_datas:
+                    hora_encontrada = "00:00" 
+                    falta_encontrada = "00:00"
+                    extra_encontrada = "00:00"
+                    
+                    for w in words:
+                        txt = re.sub(r'[*^]', '', w[4].strip())
+                        if re.match(r"^\d{2,3}:\d{2}$", txt):
+                            y_word = (w[1] + w[3]) / 2
+                            x_word = (w[0] + w[2]) / 2
+                            if abs(y_word - y_data) < 10:
+                                if x_normais and abs(x_word - x_normais) < 20:
+                                    hora_encontrada = txt
+                                elif x_faltas and abs(x_word - x_faltas) < 20:
+                                    falta_encontrada = txt
+                                elif x_extras and abs(x_word - x_extras) < 20:
+                                    extra_encontrada = txt
+                    
+                    registros_diarios[dt] = {
+                        "normais": hora_encontrada,
+                        "faltas": falta_encontrada,
+                        "extras": extra_encontrada
+                    }
+
         if nome:
-            return {"Colaborador": nome, "Departamento": departamento, "Faltas_Raw": faltas if faltas else "00:00", "Extras_Raw": extras if extras else "00:00"}
+            return {
+                "Colaborador": nome,
+                "Departamento": departamento,
+                "Registros": registros_diarios
+            }
         return None
 
     def execute_pipeline(self) -> pl.DataFrame:
-        dados_agrupados = {}
+        dados_globais = {} 
+
         for caminho in self.file_paths:
             try:
                 with fitz.open(caminho) as pdf:
+                    x_normais, x_faltas, x_extras = self._get_x_cols(pdf)
+                    
                     for page in pdf:
-                        info = self._extract_info(page)
+                        info = self._extract_page_info(page, x_normais, x_faltas, x_extras)
                         if info:
-                            chave = (info["Colaborador"], info["Departamento"])
-                            if chave not in dados_agrupados: dados_agrupados[chave] = {"faltas": 0, "extras": 0}
-                            dados_agrupados[chave]["faltas"] += self._time_to_minutes(info["Faltas_Raw"])
-                            dados_agrupados[chave]["extras"] += self._time_to_minutes(info["Extras_Raw"])
+                            chave = info["Colaborador"]
+                            
+                            if chave not in dados_globais:
+                                dados_globais[chave] = {
+                                    "Colaborador": info["Colaborador"],
+                                    "Departamento": info["Departamento"],
+                                    "Registros": info["Registros"]
+                                }
+                            else:
+                                dados_globais[chave]["Registros"].update(info["Registros"])
             except Exception as e:
                 logging.error(f"Erro em execute_pipeline: {e}")
 
-        dados_finais = [{"Colaborador": n, "Departamento": d, "Faltas (HH:MM)": self._minutes_to_time(t["faltas"]), "Extras (HH:MM)": self._minutes_to_time(t["extras"])} for (n, d), t in dados_agrupados.items()]
+        # Agora criamos uma linha para CADA DIA, entregando os dados puros para o Streamlit filtrar e somar
+        dados_finais = []
+        for chave, valores in dados_globais.items():
+            for dt, regs in valores["Registros"].items():
+                dados_finais.append({
+                    "Colaborador": valores["Colaborador"],
+                    "Departamento": valores["Departamento"],
+                    "Data": dt,
+                    "Horas Trabalhadas": regs["normais"],
+                    "Faltas": regs["faltas"],
+                    "Extras": regs["extras"]
+                })
+
         df = pl.DataFrame(dados_finais)
-        return df.sort("Faltas (HH:MM)", descending=True) if not df.is_empty() else df
-
-    def extract_all_dates(self) -> pl.DataFrame:
-        datas = set()
-        padrao = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
-        for c in self.file_paths:
-            try:
-                with fitz.open(c) as pdf:
-                    for page in pdf: datas.update(padrao.findall(page.get_text("text")))
-            except: pass
-        return pl.DataFrame({"Datas Encontradas": sorted(list(datas), key=lambda x: (x[6:], x[3:5], x[:2]))})
-
-    # --- ATUALIZADO: EXTRAÇÃO DIÁRIA DE FALTAS E EXTRAS ---
-    def extract_daily_faults(self) -> pl.DataFrame:
-        dados_diarios = []
-        for caminho in self.file_paths:
-            try:
-                with fitz.open(caminho) as pdf:
-                    for page in pdf:
-                        texto = page.get_text("text")
-                        blocos = re.split(r"(\b\d{2}/\d{2}/\d{4}\b)", texto)
-                        data_atual = None
-                        
-                        for parte in blocos:
-                            if re.match(r"^\d{2}/\d{2}/\d{4}$", parte):
-                                data_atual = parte
-                            elif data_atual:
-                                if "SÁB" in parte.upper() or "DOM" in parte.upper() or "FOLGA" in parte.upper():
-                                    data_atual = None
-                                    continue
-                                    
-                                tempos = re.findall(r"\b\d{2,3}:\d{2}\b", parte)
-                                min_falta = 0
-                                min_extra = 0
-                                
-                                # Lógica Matemática Secullum
-                                if len(tempos) == 1:
-                                    if self._time_to_minutes(tempos[0]) >= 480:
-                                        min_falta = self._time_to_minutes(tempos[0])
-                                elif len(tempos) == 6:
-                                    # [4] são as horas normais. Se < 8h, a sexta marcação é débito (Falta)
-                                    if self._time_to_minutes(tempos[4]) < 480:
-                                        min_falta = self._time_to_minutes(tempos[5])
-                                    # Se a pessoa fez 8h cravadas, a sexta marcação é crédito (Extra)
-                                    else:
-                                        min_extra = self._time_to_minutes(tempos[5])
-                                elif len(tempos) >= 7:
-                                    # Fez horas normais, teve atraso E fez extra no mesmo dia!
-                                    min_falta = self._time_to_minutes(tempos[5])
-                                    min_extra = self._time_to_minutes(tempos[6])
-                                    
-                                dados_diarios.append({
-                                    "Data": data_atual,
-                                    "Minutos_Falta": min_falta,
-                                    "Minutos_Extra": min_extra
-                                })
-                                data_atual = None
-            except Exception as e:
-                logging.error(f"Erro na extração diária: {e}")
-                
-        return pl.DataFrame(dados_diarios)
+        return df.sort(["Colaborador", "Data"]) if not df.is_empty() else df
