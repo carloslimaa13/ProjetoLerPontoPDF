@@ -2,18 +2,19 @@ import streamlit as st
 import tempfile
 import os
 import pandas as pd
-import plotly.express as px  # O novo motor gráfico para o visual Premium
+from datetime import date
 from processing import PontoProcessor
 
-st.set_page_config(page_title="Dashboard RH - Ponto", page_icon="⏱️", layout="wide")
+# 1. Configuração da página
+st.set_page_config(page_title="Dashboard RH - Horas Consolidadas", page_icon="⏱️", layout="wide")
 
-st.title("📊 Dashboard de Espelho de Ponto")
-st.markdown("Faça o upload dos relatórios do Secullum para consolidação automática de métricas.")
+st.title("⏱️ Validador Interativo de Ponto")
+st.markdown("Filtre o período desejado no calendário. A tabela e os cartões recalculam instantaneamente as somas e dividem as equipes por **Abas (Tabs)**.")
 
 arquivos_pdf = st.file_uploader("Selecione os arquivos PDF", type=["pdf"], accept_multiple_files=True)
 
 if arquivos_pdf:
-    with st.spinner("Processando dados e montando linha do tempo..."):
+    with st.spinner("Lendo PDFs e mapeando os registros..."):
         caminhos_temporarios = []
         try:
             for arquivo in arquivos_pdf:
@@ -23,121 +24,156 @@ if arquivos_pdf:
             
             processador = PontoProcessor(caminhos_temporarios)
             df_resultado = processador.execute_pipeline()
-            df_diario_polars = processador.extract_daily_faults()
+            
         finally:
             for caminho in caminhos_temporarios:
-                if os.path.exists(caminho): os.remove(caminho)
+                if os.path.exists(caminho): 
+                    os.remove(caminho)
 
+    # --- RENDERIZAÇÃO NA TELA ---
     if not df_resultado.is_empty():
         df_pandas = df_resultado.to_pandas()
 
-        def converte_hhmm_para_decimal(hhmm_str):
-            if not hhmm_str or ":" not in hhmm_str: return 0.0
-            horas, minutos = map(int, hhmm_str.split(':'))
-            return horas + (minutos / 60.0)
+        # Funções para realizar as somas no Pandas
+        def hhmm_to_min(time_str):
+            if not isinstance(time_str, str) or ":" not in time_str: return 0
+            h, m = map(int, time_str.split(':'))
+            return h * 60 + m
 
-        df_pandas['Faltas_Num'] = df_pandas['Faltas (HH:MM)'].apply(converte_hhmm_para_decimal)
-        df_pandas['Extras_Num'] = df_pandas['Extras (HH:MM)'].apply(converte_hhmm_para_decimal)
+        def min_to_hhmm(minutes):
+            h = int(minutes // 60)
+            m = int(minutes % 60)
+            return f"{h:02d}:{m:02d}"
 
-        # ==========================================
-        # SEÇÃO DE EVOLUÇÃO DIÁRIA (Gráfico Curvo com Sombra)
-        # ==========================================
-        if not df_diario_polars.is_empty():
-            df_diario = df_diario_polars.to_pandas()
-            df_diario['Data'] = pd.to_datetime(df_diario['Data'], format='%d/%m/%Y')
-            
-            # Filtro para ignorar Finais de Semana
-            df_diario = df_diario[df_diario['Data'].dt.dayofweek < 5]
-            
-            # Agrupa tudo por dia
-            df_diario_agrupado = df_diario.groupby('Data')[['Minutos_Falta', 'Minutos_Extra']].sum().reset_index()
-            
-            ultimos_7_dias = df_diario_agrupado.sort_values('Data', ascending=False).head(7)
-            ultimos_7_dias = ultimos_7_dias.sort_values('Data', ascending=True)
-            
-            ultimos_7_dias['Faltas'] = ultimos_7_dias['Minutos_Falta'] / 60.0
-            ultimos_7_dias['Extras'] = ultimos_7_dias['Minutos_Extra'] / 60.0
-            ultimos_7_dias['Data'] = ultimos_7_dias['Data'].dt.strftime('%d/%m')
-            
-            st.subheader("📅 Evolução Diária da Empresa (Últimos 7 Dias Úteis)")
-            
-            # --- MÁGICA DO PLOTLY (Sombra e Curvas) ---
-            fig = px.area(
-                ultimos_7_dias,
-                x='Data',
-                y=['Faltas', 'Extras'],
-                color_discrete_sequence=["#9719BE", "#0054FF"], # Roxo e Azul
-                line_shape='spline' # Essa configuração transforma linhas retas em curvas suaves!
+        # 1. Tratamento da coluna de Data para habilitar o Calendário
+        df_pandas['Data_Obj'] = pd.to_datetime(df_pandas['Data'], format='%d/%m/%Y', errors='coerce')
+        
+        # Pega as datas corretas usando date.today() como proteção
+        if not df_pandas['Data_Obj'].dropna().empty:
+            min_date = df_pandas['Data_Obj'].min().date()
+            max_date = df_pandas['Data_Obj'].max().date()
+        else:
+            min_date = date.today()
+            max_date = date.today()
+
+        st.markdown("---")
+        
+        col_cal1, col_cal2 = st.columns([1, 2])
+        with col_cal1:
+            st.subheader("📅 Período de Análise")
+            periodo_selecionado = st.date_input(
+                "Selecione o intervalo:",
+                value=(min_date, max_date),
+                min_value=min_date,
+                max_value=max_date,
+                format="DD/MM/YYYY"
             )
+
+        # Só recalcula se as duas datas (início e fim) estiverem selecionadas
+        if len(periodo_selecionado) == 2:
+            dt_inicio, dt_fim = periodo_selecionado
             
-            # Ajustes finos de transparência e interface
-            fig.update_layout(
-                xaxis_title="",
-                yaxis_title="Horas",
-                legend_title_text="",
-                margin=dict(l=0, r=0, t=10, b=0),
-                plot_bgcolor="rgba(0,0,0,0)", # Fundo transparente para combinar com o Streamlit
-                paper_bgcolor="rgba(0,0,0,0)",
-                hovermode="x unified" # Mostra os dois valores quando você passa o mouse por cima
-            )
-            # Trava o eixo X como texto para respeitar a nossa ordenação
-            fig.update_xaxes(type='category', showgrid=False)
-            fig.update_yaxes(showgrid=True, gridcolor='rgba(128, 128, 128, 0.2)')
+            # Filtra os dados de acordo com o calendário
+            mask = (df_pandas['Data_Obj'].dt.date >= dt_inicio) & (df_pandas['Data_Obj'].dt.date <= dt_fim)
+            df_filtrado = df_pandas[mask].copy()
 
-            # Renderiza o gráfico na tela
-            st.plotly_chart(fig, use_container_width=True)
+            # Converte as horas filtradas em minutos para poder somar
+            df_filtrado['horas_min'] = df_filtrado['Horas Trabalhadas'].apply(hhmm_to_min)
+            df_filtrado['faltas_min'] = df_filtrado['Faltas'].apply(hhmm_to_min)
+            df_filtrado['extras_min'] = df_filtrado['Extras'].apply(hhmm_to_min)
+
+            # --- PREPARAÇÃO DA TABELA CONSOLIDADA GERAL ---
+            df_consolidado = df_filtrado.groupby(['Colaborador', 'Departamento']).agg(
+                horas_sum=('horas_min', 'sum'),
+                faltas_sum=('faltas_min', 'sum'),
+                extras_sum=('extras_min', 'sum')
+            ).reset_index()
+
+            # Converte de volta para a máscara de relógio HH:MM
+            df_consolidado['Horas Trabalhadas'] = df_consolidado['horas_sum'].apply(min_to_hhmm)
+            df_consolidado['Faltas'] = df_consolidado['faltas_sum'].apply(min_to_hhmm)
+            df_consolidado['Extras'] = df_consolidado['extras_sum'].apply(min_to_hhmm)
+
+            df_display = df_consolidado[['Colaborador', 'Departamento', 'Horas Trabalhadas', 'Faltas', 'Extras']].sort_values('Colaborador')
+
+            with col_cal2:
+                st.write("") # Ajuste de alinhamento vertical
+                st.success(f"✅ Filtro aplicado! Os resultados foram atualizados para o período selecionado.")
+
+            # ==========================================
+            # CRIAÇÃO DINÂMICA DE ABAS (TABS) COM CARDS
+            # ==========================================
+            lista_departamentos = sorted(df_display['Departamento'].unique().tolist())
             
-        st.markdown("---")
+            nomes_abas = ["📊 Visão Geral"] + [f"📂 {depto}" for depto in lista_departamentos]
+            abas = st.tabs(nomes_abas)
 
-        # ==========================================
-        # SEÇÃO 1: FALTAS E ATRASOS
-        # ==========================================
-        st.header("📌 Análise de Faltas e Atrasos")
-        df_faltas_sorted = df_pandas.sort_values(by='Faltas_Num', ascending=False)
-        colab_f, tempo_f, depto_f = df_faltas_sorted.iloc[0][['Colaborador', 'Faltas (HH:MM)', 'Departamento']]
-        st.error(f"⚠️ **Maior volume de faltas/atrasos geral:** {colab_f} ({depto_f}) com **{tempo_f}**")
+            # --- ABA 0: VISÃO GERAL ---
+            with abas[0]:
+                st.markdown("### 📊 Resumo Global do Período")
+                
+                # Cálculos globais para os cards principais
+                total_colaboradores = df_filtrado['Colaborador'].nunique()
+                soma_global_horas = df_filtrado['horas_min'].sum()
+                soma_global_faltas = df_filtrado['faltas_min'].sum()
+                soma_global_extras = df_filtrado['extras_min'].sum()
 
-        c1, c2 = st.columns(2)
-        with c1:
-            st.subheader("🏢 Faltas por Departamento")
-            df_depto_f = df_pandas.groupby('Departamento')['Faltas_Num'].sum().sort_values(ascending=False)
-            st.bar_chart(df_depto_f, color="#9719BE")
-        with c2:
-            st.subheader("📈 Top 5 Colaboradores (Faltas)")
-            df_top5_f = df_faltas_sorted.head(5).copy()
-            df_top5_f['Label'] = df_top5_f['Departamento'] + " | " + df_top5_f['Colaborador']
-            st.bar_chart(df_top5_f.set_index('Label')['Faltas_Num'], color="#9719BE")
+                with st.container(border=True):
+                    c1, c2, c3, c4 = st.columns(4)
+                    with c1: st.metric(label="👥 Colaboradores Únicos", value=total_colaboradores)
+                    with c2: st.metric(label="⏱️ Total de Horas Trabalhadas", value=min_to_hhmm(soma_global_horas))
+                    with c3: st.metric(label="⚠️ Total de Faltas", value=min_to_hhmm(soma_global_faltas))
+                    with c4: st.metric(label="⭐ Total de Extras", value=min_to_hhmm(soma_global_extras))
 
-        st.markdown("---")
+                st.markdown("---")
+                st.subheader("📋 Espelho Dinâmico (Todos os Setores)")
+                st.dataframe(df_display, use_container_width=True, hide_index=True)
 
-        # ==========================================
-        # SEÇÃO 2: HORAS EXTRAS
-        # ==========================================
-        st.header("🚀 Análise de Horas Extras")
-        df_extras_sorted = df_pandas.sort_values(by='Extras_Num', ascending=False)
-        colab_e, tempo_e, depto_e = df_extras_sorted.iloc[0][['Colaborador', 'Extras (HH:MM)', 'Departamento']]
-        st.success(f"⭐ **Maior volume de horas extras:** {colab_e} ({depto_e}) com **{tempo_e}**")
+                csv_export_global = df_display.to_csv(index=False, sep=";").encode('utf-8-sig')
+                st.download_button(
+                    label="📥 Baixar Visão Geral (CSV)",
+                    data=csv_export_global,
+                    file_name=f"Ponto_Global_{dt_inicio.strftime('%d-%m')}_a_{dt_fim.strftime('%d-%m')}.csv",
+                    mime="text/csv",
+                    type="primary",
+                    key="btn_global"
+                )
 
-        c3, c4 = st.columns(2)
-        with c3:
-            st.subheader("🏢 Extras por Departamento")
-            df_depto_e = df_pandas.groupby('Departamento')['Extras_Num'].sum().sort_values(ascending=False)
-            st.bar_chart(df_depto_e, color="#0054FF")
-        with c4:
-            st.subheader("📈 Top 5 Colaboradores (Extras)")
-            df_top5_e = df_extras_sorted.head(5).copy()
-            df_top5_e['Label'] = df_top5_e['Departamento'] + " | " + df_top5_e['Colaborador']
-            st.bar_chart(df_top5_e.set_index('Label')['Extras_Num'], color="#0054FF")
+            # --- ABAS DE DEPARTAMENTOS ESPECÍFICOS ---
+            for i, depto in enumerate(lista_departamentos):
+                with abas[i + 1]:
+                    st.markdown(f"### 📊 Resumo: {depto}")
+                    
+                    # Filtra os dados crus apenas para o departamento atual e calcula os cards
+                    df_filtrado_depto = df_filtrado[df_filtrado['Departamento'] == depto]
+                    
+                    total_colab_depto = df_filtrado_depto['Colaborador'].nunique()
+                    soma_horas_depto = df_filtrado_depto['horas_min'].sum()
+                    soma_faltas_depto = df_filtrado_depto['faltas_min'].sum()
+                    soma_extras_depto = df_filtrado_depto['extras_min'].sum()
 
-        # ==========================================
-        # SEÇÃO 3: TABELA FINAL
-        # ==========================================
-        st.markdown("---")
-        st.subheader("📋 Tabela Consolidada Geral")
-        st.dataframe(
-            df_pandas.drop(columns=['Faltas_Num', 'Extras_Num']),
-            use_container_width=True,
-            hide_index=True
-        )
+                    with st.container(border=True):
+                        c1, c2, c3, c4 = st.columns(4)
+                        with c1: st.metric(label="👥 Colaboradores Únicos", value=total_colab_depto)
+                        with c2: st.metric(label="⏱️ Horas Trabalhadas", value=min_to_hhmm(soma_horas_depto))
+                        with c3: st.metric(label="⚠️ Faltas", value=min_to_hhmm(soma_faltas_depto))
+                        with c4: st.metric(label="⭐ Extras", value=min_to_hhmm(soma_extras_depto))
+
+                    st.markdown("---")
+                    st.subheader(f"📋 Setor: {depto}")
+                    
+                    df_depto_show = df_display[df_display['Departamento'] == depto].drop(columns=['Departamento'])
+                    st.dataframe(df_depto_show, use_container_width=True, hide_index=True)
+
+                    csv_export_depto = df_depto_show.to_csv(index=False, sep=";").encode('utf-8-sig')
+                    st.download_button(
+                        label=f"📥 Baixar Tabela - {depto} (CSV)",
+                        data=csv_export_depto,
+                        file_name=f"Ponto_{depto.replace(' ', '_')}_{dt_inicio.strftime('%d-%m')}_a_{dt_fim.strftime('%d-%m')}.csv",
+                        mime="text/csv",
+                        type="secondary",
+                        key=f"btn_{depto}"
+                    )
+            
     else:
-        st.error("Não foi possível extrair dados. Verifique o formato do PDF.")
+        st.error("Não foi possível extrair dados válidos. Verifique se os arquivos seguem o formato padrão.")
