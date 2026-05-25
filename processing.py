@@ -154,7 +154,6 @@ class PontoProcessor:
             except Exception as e:
                 logging.error(f"Erro em execute_pipeline: {e}")
 
-        # Agora criamos uma linha para CADA DIA, entregando os dados puros para o Streamlit filtrar e somar
         dados_finais = []
         for chave, valores in dados_globais.items():
             for dt, regs in valores["Registros"].items():
@@ -162,7 +161,7 @@ class PontoProcessor:
                     "Colaborador": valores["Colaborador"],
                     "Departamento": valores["Departamento"],
                     "Data": dt,
-                    "Horas Trabalhadas": regs["normais"],
+                    "Normais": regs["normais"], # <--- Alterado o nome de string de saída aqui
                     "Faltas": regs["faltas"],
                     "Extras": regs["extras"]
                 })
