@@ -97,7 +97,6 @@ class PontoProcessor:
             "BKO", "ADMINISTRAÇÃO", "ADMINISTRACAO"
         ]
 
-        # Evita que o Python confunda a Função do funcionário com o Departamento
         cargos_conflitantes = [
             "CONSULTORA COMERCIAL", "CONSULTOR COMERCIAL", 
             "SUPERVISORA COMERCIAL", "SUPERVISOR COMERCIAL",
@@ -112,9 +111,6 @@ class PontoProcessor:
                 for j in range(i + 1, min(i + 10, len(linhas))):
                     cand = linhas[j].strip()
 
-                    # ----------------------------
-                    # IGNORAR LIXOS
-                    # ----------------------------
                     if not cand: continue
                     if "HORÁRIO DE TRABALHO" in cand.upper(): break
                     if cand.lower() == "isento": continue
@@ -124,10 +120,6 @@ class PontoProcessor:
 
                     texto_upper = cand.upper()
 
-                    # ----------------------------
-                    # CORREÇÃO DA BLINDAGEM DE CARGOS
-                    # ----------------------------
-                    # Se a linha for apenas o nome de um cargo conflituoso, pula para a linha de baixo
                     if texto_upper in cargos_conflitantes:
                         continue
 
@@ -137,7 +129,6 @@ class PontoProcessor:
                         if texto_upper.endswith(depto):
                             departamento = depto.title()
                             
-                            # Se a linha for exatmente o departamento, ele não tem função "grudada"
                             if texto_upper == depto:
                                 funcao = "Não especificada"
                             else:
@@ -184,25 +175,39 @@ class PontoProcessor:
                     hora_encontrada = "00:00"
                     falta_encontrada = "00:00"
                     extra_encontrada = "00:00"
+                    status_pieces = [] # Armazena qualquer palavra útil achada na linha
 
                     for w in words:
-                        txt = re.sub(r'[*^¨]', '', w[4].strip())
-                        if re.match(r"^\d{2,3}:\d{2}$", txt):
-                            y_word = (w[1] + w[3]) / 2
-                            x_word = (w[0] + w[2]) / 2
+                        txt_raw = w[4].strip()
+                        txt = re.sub(r'[*^¨]', '', txt_raw)
+                        
+                        y_word = (w[1] + w[3]) / 2
+                        x_word = (w[0] + w[2]) / 2
 
-                            if abs(y_word - y_data) < 10:
+                        if abs(y_word - y_data) < 10:
+                            
+                            # Se for uma hora (HH:MM), salva nas variáveis corretas
+                            if re.match(r"^\d{2,3}:\d{2}$", txt):
                                 if x_normais and abs(x_word - x_normais) < 20:
                                     hora_encontrada = txt
                                 elif x_faltas and abs(x_word - x_faltas) < 20:
                                     falta_encontrada = txt
                                 elif x_extras and abs(x_word - x_extras) < 20:
                                     extra_encontrada = txt
+                            
+                            # Se NÃO for hora, filtra e captura o texto do Status
+                            else:
+                                # Ignora datas e traços avulsos
+                                if not re.match(r"^\d{2}/\d{2}/\d{4}$", txt) and txt not in ["-", ""]:
+                                    # Ignora dias da semana para evitar sujeira
+                                    if not re.match(r"^(Seg|Ter|Qua|Qui|Sex|Sáb|Sab|Dom|Dom\.)$", txt, re.IGNORECASE):
+                                        status_pieces.append(txt_raw)
 
                     registros_diarios[dt] = {
                         "normais": hora_encontrada,
                         "faltas": falta_encontrada,
-                        "extras": extra_encontrada
+                        "extras": extra_encontrada,
+                        "status": " ".join(status_pieces) # Junta todo o texto extraído (Ex: "ABN DIR")
                     }
 
         # ============================================================
@@ -260,7 +265,8 @@ class PontoProcessor:
                     "Data": dt,
                     "Normais": regs["normais"],
                     "Faltas": regs["faltas"],
-                    "Extras": regs["extras"]
+                    "Extras": regs["extras"],
+                    "Status": regs.get("status", "")
                 })
 
         df = pl.DataFrame(dados_finais)
