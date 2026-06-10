@@ -201,13 +201,15 @@ class PontoProcessor:
                                 if not re.match(r"^\d{2}/\d{2}/\d{4}$", txt) and txt not in ["-", ""]:
                                     # Ignora dias da semana para evitar sujeira
                                     if not re.match(r"^(Seg|Ter|Qua|Qui|Sex|Sáb|Sab|Dom|Dom\.)$", txt, re.IGNORECASE):
-                                        status_pieces.append(txt_raw)
+                                        # --- NOVA REGRA: IGNORA A SIGLA "ADM" PARA NÃO GERAR FALSA FALTA ---
+                                        if txt.upper() != "ADM":
+                                            status_pieces.append(txt_raw)
 
                     registros_diarios[dt] = {
                         "normais": hora_encontrada,
                         "faltas": falta_encontrada,
                         "extras": extra_encontrada,
-                        "status": " ".join(status_pieces) # Junta todo o texto extraído (Ex: "ABN DIR")
+                        "status": " ".join(status_pieces) # Junta todo o texto extraído
                     }
 
         # ============================================================
